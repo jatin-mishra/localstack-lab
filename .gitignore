@@ -1,0 +1,20 @@
+# Secrets / local env
+.env
+*.env.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Docker-persisted LocalStack/Postgres/Redis state
+volume/
+
+# Build artifacts
+lambda/*.zip
+
+# Lambda invoke output
+out.json
+
+# macOS
+.DS_Store

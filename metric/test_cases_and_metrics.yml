@@ -1,0 +1,131 @@
+# Success/failure criteria for the LocalStack Practice Lab.
+# Each test case = a scenario to exercise via scripts/smoke_test.sh (or manually)
+# with an explicit expected outcome. Corner cases are called out per service.
+
+success_metrics:
+  - all 3 containers (localstack, postgres, redis) report healthy via `docker compose ps`
+  - init script (01-init-aws.sh) completes with exit code 0 and is safely re-runnable (idempotent)
+  - scripts/smoke_test.sh exits 0, meaning every test case below passed
+  - state survives a `make down && make up` cycle (S3 objects, DDB items, Postgres rows)
+
+failure_metrics:
+  - any container stuck in `unhealthy` / restart loop after 60s
+  - init script errors out (non-zero exit) or leaves partial resources on re-run
+  - any smoke test assertion fails
+  - data loss after restart (persistence misconfigured)
+
+test_cases:
+  iam:
+    - name: role_created
+      scenario: describe lambda-execution-role
+      expect: role exists with trust policy for lambda.amazonaws.com
+    - name: user_policy_enforced_corner_case
+      scenario: >
+        practice-user's policy only grants s3:GetObject/ListBucket (not PutObject).
+        `iam simulate-principal-policy` is broken in this LocalStack build
+        (InternalError: 'NoneType' object is not iterable), so verified statically
+        instead: get-user-policy and assert the Action list excludes PutObject.
+      expect: attached policy's Action list contains GetObject/ListBucket, not PutObject
+
+  s3:
+    - name: put_get_roundtrip
+      scenario: put an object into practice-bucket, get it back
+      expect: byte-identical content
+    - name: versioning_corner_case
+      scenario: put same key twice with different content, list-object-versions
+      expect: 2 versions returned, latest matches most recent put
+
+  dynamodb:
+    - name: put_and_query
+      scenario: put an item into Orders, query by order_id
+      expect: item returned matches what was written
+    - name: conditional_write_corner_case
+      scenario: put an item with attribute_not_exists(order_id) condition on an existing key
+      expect: ConditionalCheckFailedException raised
+
+  sqs_standard:
+    - name: send_receive
+      scenario: send a message to practice-queue, receive it
+      expect: message body round-trips correctly
+    - name: dlq_redrive_corner_case
+      scenario: >
+        send a message, receive it 3 times without deleting (simulating repeated processing
+        failure) since redrive policy maxReceiveCount=3
+      expect: message appears in practice-queue-dlq after the 3rd failed receive
+
+  sqs_fifo:
+    - name: ordering_corner_case
+      scenario: >
+        send 3 messages with the same MessageGroupId in order A, B, C; receive+delete
+        one at a time (a FIFO group withholds its next message until the current one
+        is deleted, so the test must delete between receives, not just receive 3x)
+      expect: receive returns them strictly in order A, B, C
+    - name: dedup_corner_case
+      scenario: send the identical message body twice within the 5-minute dedup interval (content-based dedup)
+      expect: only one message is actually enqueued/received
+
+  lambda:
+    - name: direct_invoke
+      scenario: invoke hello-lambda directly with a synthetic payload
+      expect: 200 status, expected JSON response
+    - name: sqs_trigger_corner_case
+      scenario: send a message to practice-queue and wait for the event source mapping to fire
+      expect: >
+        hello-lambda executes automatically (no manual invoke), writes an item to Orders,
+        and a log entry appears in S3
+
+  cloudwatch:
+    - name: log_group_exists
+      scenario: describe-log-groups for /practice/app-logs
+      expect: log group present, contains log streams after a lambda invoke
+    - name: alarm_defined
+      scenario: describe-alarms for the SQS ApproximateNumberOfMessagesVisible alarm
+      expect: alarm exists with expected threshold/comparison operator configured
+
+  postgres:
+    - name: seed_data_present
+      scenario: SELECT count(*) from customers, products, orders, order_items
+      expect: matches seeded row counts
+    - name: restart_persistence_corner_case
+      scenario: insert a new row, `make down && make up`, re-query
+      expect: row still present (named volume persists)
+
+  redis:
+    - name: set_get
+      scenario: SET a key, GET it back
+      expect: value round-trips
+    - name: ttl_expiry_corner_case
+      scenario: SET a key with EX 2 (2-second TTL), wait 3s, GET it
+      expect: key returns nil (expired)
+
+notes:
+  - LocalStack Community CloudWatch alarms do not actively evaluate/transition state the way
+    real AWS does on the same timescale — the alarm test only verifies the alarm *definition*,
+    not a live ALARM state transition. Documented as a known limitation, not a bug.
+  - FIFO ordering is only guaranteed within the same MessageGroupId — the test case above
+    intentionally uses one group id to make this explicit.
+  - The `localstack/localstack:latest` image now requires a free LOCALSTACK_AUTH_TOKEN to
+    start at all (hard "License activation failed" exit otherwise), even for Community/free
+    services. Token lives in .env (gitignored / permission-protected), referenced in
+    docker-compose.yml as ${LOCALSTACK_AUTH_TOKEN}.
+  - `iam simulate-principal-policy` throws an InternalError in this LocalStack build -
+    tracked as a known limitation; the IAM corner-case test asserts the policy document
+    statically instead of via live simulation.
+  - The AWS CLI bundled in the LocalStack image (used by `awslocal`) is v1, which does not
+    accept the v2-only `--cli-binary-format` flag on `lambda invoke`.
+  - practice-queue is also the Lambda event source — its poller silently consumes+deletes
+    DLQ-redrive test messages before they can "fail" 3 times. The event source mapping must
+    be disabled (`update-event-source-mapping --no-enabled`) before manually testing DLQ
+    redrive, then re-enabled after. Documented in README.
+  - CONFIRMED VIA TESTING (restart_persistence_corner_case, s3 case): S3 object state is NOT
+    written to ./volume/state on this LocalStack build even with PERSISTENCE=1 and a generous
+    graceful `docker compose stop` — confirmed by checking the state dir directly (no `s3/`
+    subdirectory ever appears, unlike `dynamodb/` and `cloudwatch/` which persist immediately).
+    DynamoDB, CloudWatch, and Postgres persistence all verified working correctly across a
+    real restart. Treat S3 objects as ephemeral in this lab until/unless a LocalStack version
+    or config is found that fixes this — re-upload test objects after `make down && make up`.
+  - Running scripts/smoke_test.sh back-to-back with near-zero gap occasionally hit one
+    transient failure out of 3 rapid runs (likely async SQS/Lambda processing lag from the
+    prior run still settling) — re-running immediately after resolved it. Not observed with
+    even a few seconds between runs. Not worth adding retry complexity for a practice lab;
+    just re-run if a fresh `make smoke-test` fails right after a previous one.

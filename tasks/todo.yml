@@ -1,0 +1,55 @@
+plan: LocalStack Practice Lab
+plan_file: ~/.claude/plans/refactored-snuggling-shannon.md
+created: 2026-07-17
+
+items:
+  - id: 1
+    task: Scaffold project directory + tasks/todo.yml
+    status: done
+  - id: 2
+    task: Draft metric/test_cases_and_metrics.yml and get explicit user review
+    status: done
+  - id: 3
+    task: Write docker-compose.yml, .env, Makefile, requirements.txt
+    status: done
+  - id: 4
+    task: Write init/ready.d/01-init-aws.sh (IAM, S3, DDB, SQS+FIFO, CloudWatch, Lambda)
+    status: done
+  - id: 5
+    task: Write Lambda handler, Postgres seed SQL, smoke test scripts
+    status: done
+  - id: 6
+    task: Write README.md walkthrough
+    status: done
+  - id: 7
+    task: Bring stack up, run smoke tests, fix issues, verify restart persistence
+    status: done
+
+review: |
+  All 3 containers (localstack, postgres, redis) up and healthy. All test cases in
+  metric/test_cases_and_metrics.yml pass via `make smoke-test`, including corner cases:
+  IAM implicit-deny (verified statically, see lessons), S3 versioning, DynamoDB
+  conditional-write failure, SQS FIFO ordering + dedup, SQS DLQ redrive (verified
+  manually), Lambda direct invoke + SQS-triggered invoke, CloudWatch log group + alarm
+  definition, Postgres seeded joins, Redis TTL expiry.
+
+  Restart-persistence verified with real data (not just assumption): DynamoDB, CloudWatch,
+  and Postgres survive `make down && make up` correctly. S3 objects do NOT survive restart
+  on this LocalStack build (confirmed via clean stop test, not a timing fluke) - documented
+  as a known limitation in README Troubleshooting and metric/test_cases_and_metrics.yml notes.
+
+  Three implementation bugs found and fixed during verification (not LocalStack's fault):
+  smoke_test.sh originally used a v2-only CLI flag against the container's v1 CLI, used a
+  bad receive-without-delete loop that ignored real FIFO group-blocking semantics, and used
+  static per-run message bodies that collided with FIFO content-based dedup on repeated runs.
+  Two LocalStack Community limitations found and worked around: iam simulate-principal-policy
+  throws an internal error (replaced with a static policy-document assertion), and the latest
+  image requires a free LOCALSTACK_AUTH_TOKEN to start at all now.
+
+review_of_note: >
+  Rare flake observed: back-to-back smoke-test runs with near-zero gap failed once out of
+  three attempts (likely async processing lag settling from the prior run). Not reproducible
+  with even a few seconds between runs — documented, not engineered around further.
+
+lessons_applied:
+  - tasks/lessons.yml updated with generic patterns from this session (see that file)

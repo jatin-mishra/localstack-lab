@@ -1,0 +1,59 @@
+# Generic lessons captured from this project. Format: mistake + generic rule to prevent recurrence.
+lessons:
+  - date: 2026-07-17
+    mistake: >
+      Assumed the AWS CLI used inside the LocalStack container was the same version/flags
+      as a typical host install; used the v2-only `--cli-binary-format` flag on `lambda invoke`
+      and it failed with "Unknown options".
+    rule: >
+      When scripting against a CLI running inside someone else's container image, verify the
+      actual CLI version available there (don't assume host tooling matches) before using
+      version-specific flags.
+
+  - date: 2026-07-17
+    mistake: >
+      Wrote a smoke test for SQS FIFO ordering that called receive-message 3x without deleting,
+      assuming it would return all 3 messages in order. It only ever returned the first message.
+    rule: >
+      SQS FIFO message groups withhold their next message until the current one is deleted (or
+      its visibility timeout expires) - this is real AWS behavior, not a LocalStack quirk. Any
+      FIFO ordering test/demo must receive-then-delete each message before pulling the next.
+
+  - date: 2026-07-17
+    mistake: >
+      Reused static message bodies ("A","B","C") across repeated smoke test runs; FIFO
+      content-based dedup silently swallowed the resends within its 5-minute window, making
+      the test flaky/order-dependent on how recently it was last run.
+    rule: >
+      Test scripts that send messages to a FIFO queue with content-based dedup must use a
+      unique body (timestamp/PID/random suffix) per run to stay idempotent and repeatable.
+
+  - date: 2026-07-17
+    mistake: >
+      Manually tested SQS DLQ redrive against a queue that also had a Lambda event source
+      mapping attached. The Lambda poller silently consumed and deleted the test messages
+      before they could "fail" 3 times, making the DLQ appear broken when it wasn't.
+    rule: >
+      Before manually exercising queue-visible behavior (redrive, visibility timeout, etc.) on
+      a queue that also has a live consumer (Lambda trigger, worker), pause/disable that
+      consumer first, or use a separate queue dedicated to the manual test.
+
+  - date: 2026-07-17
+    mistake: >
+      Assumed "PERSISTENCE=1 + a named/mounted volume" was sufficient to prove all state
+      survives a restart, without actually inserting data and restarting to check each service.
+    rule: >
+      Never claim persistence works from config alone - insert real marker data per service,
+      restart for real, and re-query each one individually. In this project DynamoDB/
+      CloudWatch/Postgres persisted correctly but S3 objects did not, on the same LocalStack
+      build - a config-level assumption would have missed a real per-service gap.
+
+  - date: 2026-07-17
+    mistake: >
+      The `latest` LocalStack image started failing immediately after `docker compose up`
+      with a licensing error, invisible from `docker compose ps` alone (container just showed
+      "Exited").
+    rule: >
+      After bringing up a new/updated container image for the first time, always check its
+      logs (not just `ps`/healthcheck status) before assuming a slow startup - a hard exit
+      can look identical to "still starting" for the first several seconds.
