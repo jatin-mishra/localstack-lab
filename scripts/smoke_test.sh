@@ -107,6 +107,39 @@ sleep 3
 GOT=$(redis_exec GET smoke:ttl)
 [ -z "$GOT" ] && pass "ttl_expiry_corner_case" || fail "ttl_expiry_corner_case (got: $GOT)"
 
+# Elasticsearch/Kibana talk plain HTTP, so no in-container client binary is
+# needed - host-side curl (already required by wait_for_localstack.sh) suffices.
+ES="${ES_ENDPOINT:-http://localhost:${ES_PORT:-9200}}"
+ES_INDEX="document_chunk_content"
+es_curl() { curl -s "$@"; }
+
+echo "== Elasticsearch =="
+HEALTH=$(es_curl "$ES/_cluster/health" | grep -o '"status":"[a-z]*"')
+case "$HEALTH" in
+  *green*|*yellow*) pass "cluster_health" ;;
+  *) fail "cluster_health (got: $HEALTH)" ;;
+esac
+
+CODE=$(es_curl -o /dev/null -w '%{http_code}' -I "$ES/$ES_INDEX")
+[ "$CODE" = "200" ] && pass "index_exists" || fail "index_exists (HTTP $CODE)"
+
+COUNT=$(es_curl "$ES/$ES_INDEX/_count" | grep -o '"count":[0-9]*' | cut -d: -f2)
+[ "${COUNT:-0}" -ge 8 ] 2>/dev/null && pass "seed_doc_count" || fail "seed_doc_count (got: ${COUNT:-none})"
+
+TOP_HIT=$(es_curl "$ES/$ES_INDEX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"content":"replication"}}}' | grep -o '"_id":"[^"]*"' | head -1)
+[ -n "$TOP_HIT" ] && pass "match_query_returns_hit" || fail "match_query_returns_hit"
+
+# Relevance ordering: doc-001:1 mentions "replication" most often, so BM25 must rank it first
+echo "$TOP_HIT" | grep -q 'doc-001:1' && pass "relevance_ordering_corner_case" || fail "relevance_ordering_corner_case (top hit: $TOP_HIT)"
+
+CODE=$(es_curl -o /dev/null -w '%{http_code}' "$ES/$ES_INDEX/_doc/doc-999:1")
+[ "$CODE" = "404" ] && pass "missing_doc_404_corner_case" || fail "missing_doc_404_corner_case (HTTP $CODE)"
+
+echo "== Kibana =="
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${KIBANA_PORT:-5601}/api/status")
+[ "$CODE" = "200" ] && pass "api_status" || fail "api_status (HTTP $CODE)"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
   echo "All smoke tests passed."

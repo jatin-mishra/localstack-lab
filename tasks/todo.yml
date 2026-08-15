@@ -53,3 +53,46 @@ review_of_note: >
 
 lessons_applied:
   - tasks/lessons.yml updated with generic patterns from this session (see that file)
+
+# --- Plan 2: Elasticsearch + Kibana ---
+plan_2: Add Elasticsearch 8.x + Kibana (standalone containers, mirrors Postgres/Redis pattern)
+plan_2_file: ~/.claude/plans/serialized-riding-sparkle.md
+plan_2_created: 2026-08-15
+
+plan_2_items:
+  - id: 8
+    task: Add elasticsearch + kibana services and esdata volume to docker-compose.yml
+    status: done
+  - id: 9
+    task: Create elasticsearch/mapping.json + elasticsearch/seed_data.ndjson (8 chunks / 3 docs)
+    status: done
+  - id: 10
+    task: Write scripts/seed_elasticsearch.sh (wait loop, idempotent create + _bulk), chmod +x
+    status: done
+  - id: 11
+    task: Wire seeding into Makefile up/seed, add es-health target
+    status: done
+  - id: 12
+    task: Add Elasticsearch/Kibana blocks to smoke_test.sh and test cases to metric yml
+    status: done
+  - id: 13
+    task: Update README (table rows, walkthrough, troubleshooting); user adds ES_PORT/KIBANA_PORT to .env
+    status: done
+  - id: 14
+    task: Verify end-to-end (up, smoke-test, reseed idempotency, restart persistence, Kibana UI)
+    status: done
+
+plan_2_review: |
+  All 5 containers (localstack, postgres, redis, elasticsearch, kibana) up and healthy.
+  `make smoke-test` fully green: all pre-existing assertions plus 7 new ones
+  (ES cluster health, index exists, seed doc count, match query, BM25 relevance
+  ordering, missing-doc 404, Kibana api_status). Verified beyond the smoke test:
+  reseed idempotency (seed script run twice, doc count unchanged at 9 = 8 seeded
+  + 1 custom probe), restart persistence (custom doc survived `make down && make up`
+  via esdata volume; seed script correctly skipped index creation on restart),
+  Kibana connected to ES credential-less with security disabled. One transient
+  smoke failure observed on the very first run (sqs_standard send_receive) - the
+  already-documented Lambda-poller-consumes-test-message race, passed on immediate
+  re-run, unrelated to this change. Probe doc deleted afterward; lab left in the
+  documented 8-doc seeded state. NOTE: ES_PORT/KIBANA_PORT are optional .env keys;
+  compose falls back to 9200/5601 defaults, so nothing to add unless overriding.

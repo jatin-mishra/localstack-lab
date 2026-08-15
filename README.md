@@ -2,8 +2,9 @@
 
 A local, free AWS practice environment: **IAM, S3, DynamoDB, SQS (standard + FIFO),
 Lambda, CloudWatch/Logs** via [LocalStack](https://www.localstack.cloud/) Community,
-plus a plain **Postgres** container (RDBMS) and **Redis** container — real engines,
-not AWS API emulations, since ElastiCache/RDS emulation is LocalStack Pro-only.
+plus plain **Postgres**, **Redis**, and **Elasticsearch** (+ **Kibana** UI) containers —
+real engines, not AWS API emulations, since ElastiCache/RDS emulation is LocalStack
+Pro-only and the OpenSearch emulation isn't the real Elasticsearch we want to practice.
 
 ## Prerequisites
 - Docker + Docker Compose (confirmed: Docker 29.3, Compose v5.1)
@@ -35,8 +36,8 @@ not AWS API emulations, since ElastiCache/RDS emulation is LocalStack Pro-only.
 
 ## Quickstart
 ```bash
-make up            # packages the lambda zip, starts all containers, waits for readiness
-make ps             # confirm all 3 containers are healthy
+make up            # packages the lambda zip, starts all containers, waits + seeds ES
+make ps             # confirm all 5 containers are healthy (kibana can take ~60-90s)
 make smoke-test      # exercises every service end-to-end
 ```
 
@@ -58,6 +59,8 @@ To reset everything (wipes all data): `make clean`.
 | Lambda | `hello-lambda` (Python 3.12), triggered by `practice-queue`, writes to DynamoDB + S3 + a custom metric |
 | Postgres | `customers`, `products`, `orders`, `order_items` tables, seeded |
 | Redis | empty, ready for `SET`/`GET`/`EXPIRE` practice |
+| Elasticsearch | index `document_chunk_content` (`_id` = `<documentid>:<chunkid>`, fields `document_id`/`chunk_id` keyword + `content` text), seeded with 8 chunks across 3 documents |
+| Kibana | UI at http://localhost:5601 (Dev Tools console; no login — security disabled) |
 
 All AWS commands below assume `awslocal` (from `awscli-local`, in `requirements.txt`)
 or plain `aws --endpoint-url=http://localhost:4566 --region us-east-1`. If you set up
@@ -178,6 +181,36 @@ make redis-cli
 127.0.0.1:6379> GET foo
 ```
 
+### Elasticsearch
+The seeded index is `document_chunk_content` — document chunks keyed by
+`_id = <documentid>:<chunkid>` with a full-text `content` field (index names must be
+lowercase in ES, hence not "DocumentChunkContent").
+```bash
+make es-health                                             # cluster health (expect green)
+curl "http://localhost:9200/document_chunk_content/_doc/doc-001:1?pretty"   # get by id
+# Full-text search, BM25-scored (doc-001:1 mentions "replication" most, ranks first):
+curl "http://localhost:9200/document_chunk_content/_search?pretty" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"content":"replication"}}}'
+# Exact filter on a keyword field:
+curl "http://localhost:9200/document_chunk_content/_search?pretty" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"document_id":"doc-002"}}}'
+```
+Reseed any time with `make seed` — idempotent: explicit `_id`s mean re-runs overwrite
+the seeded docs in place, never duplicate, and your own docs are left untouched.
+Restart-persistence: index a doc with your own `_id`, `make down && make up`, GET it
+back — the `esdata` named volume keeps it.
+
+### Kibana
+Open http://localhost:5601 (no login — security is disabled for this lab). Dev Tools →
+Console (http://localhost:5601/app/dev_tools#/console) is the interactive query console,
+the ES equivalent of `make psql`. Try:
+```
+GET document_chunk_content/_search
+{ "query": { "match": { "content": "replication" } } }
+```
+
 ## Troubleshooting
 
 - **`awslocal: command not found`** — the venv from the Prerequisites section was
@@ -192,8 +225,22 @@ make redis-cli
   used"**, then `make down && make up`.
 - **`make seed` says the zip is missing** — run `./scripts/package_lambda.sh` first
   (or just use `make seed`, which does this automatically).
-- **Ports already in use** — something else is bound to 4566/5432/6379; stop it or
-  change the port mappings in `docker-compose.yml` / `.env`.
+- **Ports already in use** — something else is bound to 4566/5432/6379/9200/5601; stop
+  it or change the port mappings in `docker-compose.yml` / `.env`. Elasticsearch/Kibana
+  ports default to 9200/5601 (`${ES_PORT:-9200}` / `${KIBANA_PORT:-5601}`); add
+  `ES_PORT=` / `KIBANA_PORT=` lines to `.env` to override. Note host-side scripts
+  (`seed_elasticsearch.sh`, `smoke_test.sh`) don't read `.env` — if you customize the
+  ports, export the variable in your shell too (e.g. `ES_PORT=9201 make smoke-test`).
+- **Elasticsearch exits with code 137 / Kibana very slow** — the Docker Desktop VM is
+  low on memory; the ES+Kibana pair adds roughly 1.5 GB (ES has a 512 MB heap but ~1 GB
+  RSS, Kibana ~500 MB). Give Docker Desktop ≥ 6 GB in Settings → Resources.
+- **`vm.max_map_count` warning in ES logs** — harmless here: `discovery.type=single-node`
+  demotes bootstrap checks to warnings, and Docker Desktop's Linux VM already ships with
+  `vm.max_map_count=262144`.
+- **Cluster health yellow** — expected on a single node for any index with replicas > 0;
+  the seeded index sets `number_of_replicas: 0` (so health stays green), but indices you
+  create with default settings will turn the cluster yellow. Fix with
+  `"number_of_replicas": 0` in the index settings; the smoke test accepts yellow.
 - **S3 objects vanish after `make down && make up`** — confirmed (not a timing fluke,
   tested with a generous graceful shutdown): DynamoDB, CloudWatch, and Postgres state
   all persist correctly across a restart, but S3 object data does not get written to

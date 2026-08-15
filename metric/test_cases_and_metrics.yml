@@ -3,8 +3,9 @@
 # with an explicit expected outcome. Corner cases are called out per service.
 
 success_metrics:
-  - all 3 containers (localstack, postgres, redis) report healthy via `docker compose ps`
+  - all 5 containers (localstack, postgres, redis, elasticsearch, kibana) report healthy via `docker compose ps`
   - init script (01-init-aws.sh) completes with exit code 0 and is safely re-runnable (idempotent)
+  - seed_elasticsearch.sh completes with exit code 0 and is safely re-runnable (explicit _ids overwrite, never duplicate)
   - scripts/smoke_test.sh exits 0, meaning every test case below passed
   - state survives a `make down && make up` cycle (S3 objects, DDB items, Postgres rows)
 
@@ -98,6 +99,39 @@ test_cases:
       scenario: SET a key with EX 2 (2-second TTL), wait 3s, GET it
       expect: key returns nil (expired)
 
+  elasticsearch:
+    - name: cluster_health
+      scenario: GET /_cluster/health
+      expect: status green or yellow (single node; seeded index uses 0 replicas so green expected)
+    - name: index_exists
+      scenario: HEAD /document_chunk_content
+      expect: HTTP 200; mapping has content:text + document_id/chunk_id:keyword
+    - name: seed_doc_count
+      scenario: GET /document_chunk_content/_count after make up
+      expect: count >= 8 (all seeded chunks present)
+    - name: match_query_returns_hit
+      scenario: match query on content for a seeded term ("replication")
+      expect: at least one hit returned with a _score
+    - name: relevance_ordering_corner_case
+      scenario: >
+        match query for "replication", which appears with different frequency across
+        chunks (doc-001:1 most often, then doc-002:2, then doc-001:2)
+      expect: chunk with highest term frequency (doc-001:1) ranks first (BM25 scoring)
+    - name: missing_doc_404_corner_case
+      scenario: GET /document_chunk_content/_doc/doc-999:1 (nonexistent id)
+      expect: HTTP 404 with found:false, not a 5xx error
+    - name: reseed_idempotency_corner_case
+      scenario: run make seed twice, re-check _count
+      expect: count unchanged (explicit _ids overwrite; index creation skips on resource_already_exists)
+    - name: restart_persistence_corner_case
+      scenario: index a new doc with a custom _id, `make down && make up`, GET it by id
+      expect: doc still present (esdata named volume persists; reseed only overwrites seeded _ids)
+
+  kibana:
+    - name: api_status
+      scenario: GET http://localhost:5601/api/status
+      expect: HTTP 200 (Kibana up and connected to elasticsearch)
+
 notes:
   - LocalStack Community CloudWatch alarms do not actively evaluate/transition state the way
     real AWS does on the same timescale — the alarm test only verifies the alarm *definition*,
@@ -124,6 +158,12 @@ notes:
     DynamoDB, CloudWatch, and Postgres persistence all verified working correctly across a
     real restart. Treat S3 objects as ephemeral in this lab until/unless a LocalStack version
     or config is found that fixes this — re-upload test objects after `make down && make up`.
+  - Elasticsearch/Kibana run with security intentionally disabled (xpack.security.enabled=false,
+    no auth, no TLS) - lab-only configuration, never appropriate for anything but localhost.
+    This is also why Kibana connects credential-less via ELASTICSEARCH_HOSTS alone.
+  - The seed index is lowercase `document_chunk_content` (user's working name
+    "DocumentChunkContent" normalized) because Elasticsearch rejects uppercase index names.
+    Document _id convention is `<documentid>:<chunkid>`, e.g. doc-001:2.
   - Running scripts/smoke_test.sh back-to-back with near-zero gap occasionally hit one
     transient failure out of 3 rapid runs (likely async SQS/Lambda processing lag from the
     prior run still settling) — re-running immediately after resolved it. Not observed with
