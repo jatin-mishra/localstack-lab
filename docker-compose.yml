@@ -24,7 +24,7 @@ services:
       start_period: 20s
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: practice-postgres
     ports:
       - "${POSTGRES_PORT}:5432"
@@ -89,6 +89,59 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+
+  # Temporal server. Reuses the practice-postgres container for persistence
+  # (auto-setup creates its own `temporal` + `temporal_visibility` databases in
+  # that server; the `practice` DB is untouched). gRPC frontend on 7233.
+  temporal:
+    image: temporalio/auto-setup:${TEMPORAL_VERSION:-1.25.2}
+    container_name: practice-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_SEEDS=postgres
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD}
+      - DBNAME=temporal
+      - VISIBILITY_DBNAME=temporal_visibility
+      - DEFAULT_NAMESPACE=default
+      - DEFAULT_NAMESPACE_RETENTION=72h
+      # auto-setup binds the frontend to the container's own IP, not loopback, so tctl
+      # must dial the service DNS name (resolves to that IP), not 127.0.0.1. Setting this
+      # once makes every tctl call — healthcheck, seed, smoke, `make temporal-cli` — work
+      # without repeating --address (docker compose exec inherits this env).
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    healthcheck:
+      test: ["CMD", "tctl", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  # Temporal Web UI. Talks to the frontend over gRPC; served on 8080 in-container,
+  # published on ${TEMPORAL_UI_PORT:-8233} to avoid colliding with other host ports.
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-2.31.2}
+    container_name: practice-temporal-ui
+    depends_on:
+      temporal:
+        condition: service_healthy
+    ports:
+      - "${TEMPORAL_UI_PORT:-8233}:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:${TEMPORAL_UI_PORT:-8233}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
 
 volumes:
   pgdata:

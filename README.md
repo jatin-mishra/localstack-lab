@@ -4,7 +4,8 @@ A local, free AWS practice environment: **IAM, S3, DynamoDB, SQS (standard + FIF
 Lambda, CloudWatch/Logs** via [LocalStack](https://www.localstack.cloud/) Community,
 plus plain **Postgres**, **Redis**, and **Elasticsearch** (+ **Kibana** UI) containers —
 real engines, not AWS API emulations, since ElastiCache/RDS emulation is LocalStack
-Pro-only and the OpenSearch emulation isn't the real Elasticsearch we want to practice.
+Pro-only and the OpenSearch emulation isn't the real Elasticsearch we want to practice —
+and a real **Temporal** server (+ **Web UI**) for workflow-orchestration practice.
 
 ## Prerequisites
 - Docker + Docker Compose (confirmed: Docker 29.3, Compose v5.1)
@@ -36,8 +37,8 @@ Pro-only and the OpenSearch emulation isn't the real Elasticsearch we want to pr
 
 ## Quickstart
 ```bash
-make up            # packages the lambda zip, starts all containers, waits + seeds ES
-make ps             # confirm all 5 containers are healthy (kibana can take ~60-90s)
+make up            # packages the lambda zip, starts all containers, waits + seeds ES & Temporal
+make ps             # confirm all 7 containers are healthy (kibana + temporal can take ~40-90s)
 make smoke-test      # exercises every service end-to-end
 ```
 
@@ -61,6 +62,8 @@ To reset everything (wipes all data): `make clean`.
 | Redis | empty, ready for `SET`/`GET`/`EXPIRE` practice |
 | Elasticsearch | index `document_chunk_content` (`_id` = `<documentid>:<chunkid>`, fields `document_id`/`chunk_id` keyword + `content` text), seeded with 8 chunks across 3 documents |
 | Kibana | UI at http://localhost:5601 (Dev Tools console; no login — security disabled) |
+| Temporal | server on `localhost:7233` (gRPC), persistence backed by the practice-postgres container (`temporal` + `temporal_visibility` DBs); namespaces `default` + `practice` |
+| Temporal UI | Web UI at http://localhost:8233 (no login) |
 
 All AWS commands below assume `awslocal` (from `awscli-local`, in `requirements.txt`)
 or plain `aws --endpoint-url=http://localhost:4566 --region us-east-1`. If you set up
@@ -211,6 +214,38 @@ GET document_chunk_content/_search
 { "query": { "match": { "content": "replication" } } }
 ```
 
+### Temporal
+A real [Temporal](https://temporal.io/) server for workflow-orchestration practice. It
+persists to the **practice-postgres** container (auto-setup creates its own `temporal` and
+`temporal_visibility` databases there — the `practice` DB is untouched). The `tctl` CLI ships
+inside the `temporal` container, so drive it via the `temporal-cli` make target (no host install):
+```bash
+make temporal-cli ARGS="cluster health"           # -> SERVING
+make temporal-cli ARGS="namespace list"            # default + practice
+make temporal-cli ARGS="--namespace practice namespace describe"
+```
+The `practice` namespace is registered idempotently by `scripts/seed_temporal.sh` (re-run any
+time with `make seed`). Open the Web UI at **http://localhost:8233** (`make temporal-ui` prints
+the URL) — switch namespaces with the dropdown top-left.
+
+Restart-persistence: the Temporal databases live in the same `pgdata` volume as the Postgres
+tables, so namespaces survive `make down && make up` (the seed script then skips re-registering
+`practice`).
+
+> **Seeing real workflow + activity history.** This lab provisions the Temporal *infrastructure*
+> only — there is intentionally no SDK worker, so there are no executed workflows to seed
+> (Temporal has no built-in demo workflow, and a CLI-started workflow with no worker just sits
+> in `Running`). To generate real history, run a worker against this server and start a workflow.
+> Minimal Python path:
+> ```bash
+> pip install temporalio
+> # worker.py: connect to localhost:7233, namespace "practice", register a workflow + activity
+> # on a task queue, then `await worker.run()`; a starter kicks off an execution.
+> ```
+> See the [Temporal Python samples](https://github.com/temporalio/samples-python). Point the
+> worker's `Client.connect("localhost:7233", namespace="practice")` at this server and its runs
+> appear live in the Web UI.
+
 ## Troubleshooting
 
 - **`awslocal: command not found`** — the venv from the Prerequisites section was
@@ -251,3 +286,17 @@ GET document_chunk_content/_search
   `latest` image now requires a free `LOCALSTACK_AUTH_TOKEN` to start at all, even for
   Community/free services. Sign up free at https://app.localstack.cloud, grab your
   token, and add `LOCALSTACK_AUTH_TOKEN=<token>` to `.env`.
+- **`temporal` container restart-loops / seed_temporal.sh times out** — the server can't
+  reach its persistence. It depends on `practice-postgres` being healthy and uses the same
+  `POSTGRES_USER`/`POSTGRES_PASSWORD` from `.env`; that user must be able to `CREATE DATABASE`
+  (the default Postgres image superuser is). Check `docker compose logs temporal` — schema
+  setup errors surface there, not in `ps`. Ports 7233/8233 must also be free (override with
+  `TEMPORAL_PORT`/`TEMPORAL_UI_PORT` in `.env`).
+- **`tctl` says `connection refused` on `127.0.0.1:7233`** — auto-setup binds the frontend to
+  the container's own IP, not loopback. Address it by the service name instead
+  (`tctl --address temporal:7233 ...`); the `temporal` container already sets
+  `TEMPORAL_CLI_ADDRESS=temporal:7233`, so `make temporal-cli` and the seed/smoke scripts need
+  no `--address` flag.
+- **Web UI shows no workflows** — expected. This lab provisions Temporal infra only (no SDK
+  worker), so there's nothing to execute yet. See the Temporal walkthrough above for running a
+  worker to generate real workflow/activity history.

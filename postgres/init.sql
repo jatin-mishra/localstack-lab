@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE customers (
     customer_id SERIAL PRIMARY KEY,
     name        TEXT NOT NULL,

@@ -140,6 +140,21 @@ echo "== Kibana =="
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${KIBANA_PORT:-5601}/api/status")
 [ "$CODE" = "200" ] && pass "api_status" || fail "api_status (HTTP $CODE)"
 
+# tctl runs inside the temporal container (auto-setup image ships it); the UI is
+# checked host-side over HTTP, same split as Elasticsearch (in-container) vs Kibana (host).
+tctl_exec() { docker compose exec -T temporal tctl "$@"; }
+
+echo "== Temporal =="
+tctl_exec cluster health >/dev/null 2>&1 && pass "cluster_health" || fail "cluster_health"
+
+tctl_exec --namespace default namespace describe >/dev/null 2>&1 && pass "default_namespace_exists" || fail "default_namespace_exists"
+
+tctl_exec --namespace practice namespace describe >/dev/null 2>&1 && pass "practice_namespace_registered" || fail "practice_namespace_registered"
+
+echo "== Temporal UI =="
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${TEMPORAL_UI_PORT:-8233}/")
+[ "$CODE" = "200" ] && pass "ui_reachable" || fail "ui_reachable (HTTP $CODE)"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
   echo "All smoke tests passed."
